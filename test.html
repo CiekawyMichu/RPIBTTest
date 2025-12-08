@@ -221,37 +221,36 @@ function handleData(event){
     status.textContent = "Initial Calibration Complete";
   }
 
-  // --- apply offsets ---
-  let roll = rawData.roll - (offsets?.roll || 0);
-  let pitch = rawData.pitch - (offsets?.pitch || 0);
-  let yaw = rawData.yaw - (offsets?.yaw || 0);
-  // Wrap to [-180, 180]
-  roll = wrapAngle(roll);
-  pitch = wrapAngle(pitch);
-  yaw = wrapAngle(yaw);
-  
-  let Ax = rawData.Ax - (offsets?.Ax || 0);
-  let Ay = rawData.Ay - (offsets?.Ay || 0);
-  let Az = rawData.Az - (offsets?.Az || 0);
+  // Wrap angles first
+let roll = wrapAngle(rawData.roll - (offsets?.roll || 0));
+let pitch = wrapAngle(rawData.pitch - (offsets?.pitch || 0));
+let yaw = wrapAngle(rawData.yaw - (offsets?.yaw || 0));
 
-  let newData = { roll, pitch, yaw, Ax, Ay, Az };
+let Ax = rawData.Ax - (offsets?.Ax || 0);
+let Ay = rawData.Ay - (offsets?.Ay || 0);
+let Az = rawData.Az - (offsets?.Az || 0);
 
-  // --- apply spike filter, skipping first few readings after calibration ---
-  const rpyThresh = parseFloat(rpyThresholdInput.value) || CONFIG.spikeThresholds.rpy;
-  const accThresh = parseFloat(accThresholdInput.value) || CONFIG.spikeThresholds.acc;
-  if(latestData && skipSpikeCount <= 0){
-    for(let k of ['roll','pitch','yaw'])
-      if(Math.abs(newData[k] - latestData[k]) > rpyThresh)
-        newData[k] = latestData[k];
-    for(let k of ['Ax','Ay','Az'])
-      if(Math.abs(newData[k] - latestData[k]) > accThresh)
-        newData[k] = latestData[k];
+let newData = { roll, pitch, yaw, Ax, Ay, Az };
+
+// --- Spike checking with angle wrapping ---
+const rpyThresh = parseFloat(rpyThresholdInput.value) || CONFIG.spikeThresholds.rpy;
+const accThresh = parseFloat(accThresholdInput.value) || CONFIG.spikeThresholds.acc;
+
+if (latestData && skipSpikeCount <= 0) {
+  // Compare angles using wrapped differences
+  for (let k of ['roll','pitch','yaw']) {
+    const diff = wrapAngle(newData[k] - latestData[k]);
+    if (Math.abs(diff) > rpyThresh) newData[k] = latestData[k];
   }
 
-  // decrement skip counter if set
-  if(skipSpikeCount > 0) skipSpikeCount--;
+  // Linear acceleration spikes as usual
+  for (let k of ['Ax','Ay','Az']) {
+    if (Math.abs(newData[k] - latestData[k]) > accThresh) newData[k] = latestData[k];
+  }
+}
 
-  latestData = newData;
+if (skipSpikeCount > 0) skipSpikeCount--;
+latestData = newData;
 
   // --- update charts and visuals ---
   if(sending){
