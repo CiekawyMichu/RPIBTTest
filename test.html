@@ -1,36 +1,25 @@
-<!DOCTYPE html>
 <html>
-<head>
-  <meta charset="utf-8">
-  <title>MPU Random Data</title>
+
+
+ <head>
+
+
+ </head>
+
+
+ <body>
+
+
   <script src="https://www.puck-js.com/puck.js"></script>
-</head>
-<body>
-  <h1>Random number from Pi:</h1>
-  <div id="number">Not connected</div>
-  <button id="connectBtn">Connect to Pi</button>
 
-  <script>
-    const display = document.getElementById('number');
-    const connectBtn = document.getElementById('connectBtn');
 
-    connectBtn.addEventListener('click', async () => {
-      try {
-        // Connect to the PiPuck BLE device
-        const puck = await Puck.connect({ name: 'PiPuck' });
+  <button onclick="Puck.write('LED1.set();\n');">LED On!</button>
 
-        // Subscribe to notifications from the TX characteristic
-        await puck.notify('6e400003-b5a3-f393-e0a9-e50e24dcca9e', function(data) {
-          // Data is sent as string from Pi
-          display.textContent = data;
-        });
 
-        display.textContent = "Connected! Waiting for data...";
-      } catch (err) {
-        console.error(err);
-        display.textContent = "Failed to connect";
-      }
-    });
-  </script>
-</body>
+  <button onclick="Puck.write('LED1.reset();\n');">LED Off!</button>
+
+
+ </body>
+
+
 </html>
