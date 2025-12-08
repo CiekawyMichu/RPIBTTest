@@ -1,25 +1,267 @@
+<!DOCTYPE html>
 <html>
+<head>
+<meta charset="utf-8">
+<title>MPU6050 Full Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+  canvas { max-width: 400px; margin: 10px; }
+  button, input { margin: 5px; }
+  label { margin-right: 10px; }
+  .circle-container { display:flex; flex-direction:column; align-items:center; }
+  .circle-item { margin:10px; }
+</style>
+</head>
+<body>
+
+<h1>MPU6050 Dashboard</h1>
+<div id="status">Not connected</div>
+<button id="connectBtn">Connect to Pi</button>
+<button id="startStopBtn" disabled>Stop</button>
+
+<h2>Calibration & Thresholds</h2>
+<button id="calibrateBtn" disabled>Calibrate Now</button>
+<div>
+  <label>RPY Spike Threshold (deg): <input type="number" id="rpyThresholdInput" value="80"></label>
+  <label>Acc Spike Threshold (G): <input type="number" id="accThresholdInput" value="5"></label>
+</div>
+<div>
+  <label>RPY Y-axis Min: <input type="number" id="rpyMinInput" value="-180"></label>
+  <label>RPY Y-axis Max: <input type="number" id="rpyMaxInput" value="180"></label>
+</div>
+<div>
+  <label>Acc Y-axis Min: <input type="number" id="accMinInput" value="-5"></label>
+  <label>Acc Y-axis Max: <input type="number" id="accMaxInput" value="5"></label>
+</div>
+<div>
+  <label>Poll rate (Hz): <input type="number" id="pollRateHzInput" value="10"></label>
+</div>
+
+<h2>Roll, Pitch, Yaw</h2>
+<canvas id="rpyChart"></canvas>
+
+<h2>Linear Acceleration</h2>
+<canvas id="accChart"></canvas>
+
+<h2>Acceleration Circles (Gs)</h2>
+<div class="circle-container">
+  <div class="circle-item"><canvas id="xyCircle" width="300" height="300"></canvas></div>
+  <div class="circle-item"><canvas id="xzCircle" width="300" height="300"></canvas></div>
+  <div class="circle-item"><canvas id="zyCircle" width="300" height="300"></canvas></div>
+</div>
+
+<h2>RPY Visualization</h2>
+<canvas id="rpyViz" width="400" height="400" style="border:1px solid #000;"></canvas>
+
+<script type="module">
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.162.0/build/three.module.js';
+
+// ===== CONFIG =====
+const CONFIG = {
+  spikeThresholds: { rpy: 80, acc: 5 },
+  yAxisLimits: { rpy: {min:-180,max:180}, acc: {min:-5,max:5} },
+  chartWindowSize: 50,
+  autoCalibrateOnFirstData: true,
+  pollRateHz: 10
+};
+
+// ===== DOM Elements =====
+const status = document.getElementById('status');
+const connectBtn = document.getElementById('connectBtn');
+const startStopBtn = document.getElementById('startStopBtn');
+const calibrateBtn = document.getElementById('calibrateBtn');
+const rpyThresholdInput = document.getElementById('rpyThresholdInput');
+const accThresholdInput = document.getElementById('accThresholdInput');
+const rpyMinInput = document.getElementById('rpyMinInput');
+const rpyMaxInput = document.getElementById('rpyMaxInput');
+const accMinInput = document.getElementById('accMinInput');
+const accMaxInput = document.getElementById('accMaxInput');
+const pollRateHzInput = document.getElementById('pollRateHzInput');
+
+let device, server, service, txChar;
+let rawData = null;      // latest raw sensor readings
+let latestData = null;   // offset-adjusted data
+let offsets = null;      // calibration offsets
+let skipSpikeCount = 0;  // number of readings to skip spike filter after calibration
+let sending = true;
+
+// ===== Charts =====
+const rpyData = {labels: [], datasets:[
+  {label:'Roll', borderColor:'red', data:[]},
+  {label:'Pitch', borderColor:'green', data:[]},
+  {label:'Yaw', borderColor:'blue', data:[]}
+]};
+const accData = {labels: [], datasets:[
+  {label:'Ax', borderColor:'red', data:[]},
+  {label:'Ay', borderColor:'green', data:[]},
+  {label:'Az', borderColor:'blue', data:[]}
+]};
+
+const rpyChart = new Chart(document.getElementById('rpyChart'), {type:'line', data:rpyData, options:{animation:false,responsive:true,scales:{x:{title:{display:true,text:'Time'}},y:{min:CONFIG.yAxisLimits.rpy.min,max:CONFIG.yAxisLimits.rpy.max,title:{display:true,text:'Degrees'}}}}});
+const accChart = new Chart(document.getElementById('accChart'), {type:'line', data:accData, options:{animation:false,responsive:true,scales:{x:{title:{display:true,text:'Time'}},y:{min:CONFIG.yAxisLimits.acc.min,max:CONFIG.yAxisLimits.acc.max,title:{display:true,text:'G'}}}}});
+
+// ===== Scatter Circles =====
+function createCircleChart(canvasId,xLabel,yLabel,color){
+  return new Chart(document.getElementById(canvasId),{
+    type:'scatter',
+    data:{datasets:[{label:'',data:[{x:0,y:0}],borderColor:color,backgroundColor:color}]},
+    options:{animation:false,responsive:false,plugins:{legend:{display:false}},scales:{x:{min:-5,max:5,title:{display:true,text:xLabel}},y:{min:-5,max:5,title:{display:true,text:yLabel}}}}
+  });
+}
+const xyCircle = createCircleChart('xyCircle','Ax (G)','Ay (G)','blue');
+const xzCircle = createCircleChart('xzCircle','Ax (G)','Az (G)','green');
+const zyCircle = createCircleChart('zyCircle','Ay (G)','Az (G)','red');
+
+// ===== 3D RPY Visualization =====
+const vizCanvas = document.getElementById('rpyViz');
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(75,1,0.1,1000);
+const renderer = new THREE.WebGLRenderer({canvas:vizCanvas});
+renderer.setSize(400,400);
+
+const geometry = new THREE.BoxGeometry(1,0.5,0.2);
+const material = new THREE.MeshNormalMaterial();
+const cube = new THREE.Mesh(geometry,material);
+scene.add(cube);
+camera.position.z = 3;
+
+function animateRPY(){
+  requestAnimationFrame(animateRPY);
+  if(latestData){
+    const rollRad = latestData.roll * Math.PI/180;
+    const pitchRad = latestData.pitch * Math.PI/180;
+    const yawRad = latestData.yaw * Math.PI/180;
+    cube.rotation.x = pitchRad;
+    cube.rotation.y = yawRad;
+    cube.rotation.z = rollRad;
+  }
+  renderer.render(scene,camera);
+}
+animateRPY();
+
+// ===== Button Handlers =====
+connectBtn.addEventListener('click', async () => {
+  try {
+    device = await navigator.bluetooth.requestDevice({filters:[{name:'PiPuck'}],optionalServices:['6e400001-b5a3-f393-e0a9-e50e24dcca9e']});
+    server = await device.gatt.connect();
+    service = await server.getPrimaryService('6e400001-b5a3-f393-e0a9-e50e24dcca9e');
+    txChar = await service.getCharacteristic('6e400003-b5a3-f393-e0a9-e50e24dcca9e');
+    await txChar.startNotifications();
+    txChar.addEventListener('characteristicvaluechanged', handleData);
+    status.textContent = "Connected! Receiving data...";
+    calibrateBtn.disabled = false;
+    startStopBtn.disabled = false;
+  } catch(err){ console.error(err); status.textContent = "Failed to connect"; }
+});
+
+startStopBtn.addEventListener('click', ()=>{ sending=!sending; startStopBtn.textContent=sending?"Stop":"Start"; });
+pollRateHzInput.addEventListener('change', ()=>{ CONFIG.pollRateHz = parseFloat(pollRateHzInput.value)||CONFIG.pollRateHz; });
+
+calibrateBtn.addEventListener('click', ()=>{
+  if(!rawData) return;
+
+  offsets = {...rawData};  // use raw sensor readings
+  skipSpikeCount = 3;      // skip spike filter for next 3 readings to avoid jumps
+  latestData = null;       // reset latestData
+  status.textContent = "Manual Calibration: New Zero Set";
+
+  // reset charts
+  rpyChart.data.labels = [];
+  rpyChart.data.datasets.forEach(ds => ds.data = []);
+  accChart.data.labels = [];
+  accChart.data.datasets.forEach(ds => ds.data = []);
+  rpyChart.update();
+  accChart.update();
+
+  // reset scatter circles
+  xyCircle.data.datasets[0].data = [{x:0, y:0}];
+  xzCircle.data.datasets[0].data = [{x:0, y:0}];
+  zyCircle.data.datasets[0].data = [{x:0, y:0}];
+  xyCircle.update(); xzCircle.update(); zyCircle.update();
+
+  // reset 3D cube
+  cube.rotation.x = 0;
+  cube.rotation.y = 0;
+  cube.rotation.z = 0;
+});
 
 
- <head>
+
+// ===== Data Handling =====
+let lastUpdate=0;
+function handleData(event){
+  const now = performance.now();
+  if(now - lastUpdate < 1000 / CONFIG.pollRateHz) return;
+  lastUpdate = now;
+
+  const raw = new TextDecoder().decode(event.target.value);
+  const match = raw.match(/RPY:\s*([\d\-.]+),([\d\-.]+),([\d\-.]+)\s*\|\s*Acc:\s*([\d\-.]+),([\d\-.]+),([\d\-.]+),?/);
+  if(!match) return;
+
+  // --- parse raw sensor data ---
+  rawData = {
+    roll: parseFloat(match[1]),
+    pitch: parseFloat(match[2]),
+    yaw: parseFloat(match[3]),
+    Ax: parseFloat(match[4]),
+    Ay: parseFloat(match[5]),
+    Az: parseFloat(match[6])
+  };
+
+  // --- auto calibrate if first reading ---
+  if(offsets === null && CONFIG.autoCalibrateOnFirstData){
+    offsets = {...rawData};
+    status.textContent = "Initial Calibration Complete";
+  }
+
+  // --- apply offsets ---
+  let roll = rawData.roll - (offsets?.roll || 0);
+  let pitch = rawData.pitch - (offsets?.pitch || 0);
+  let yaw = rawData.yaw - (offsets?.yaw || 0);
+  let Ax = rawData.Ax - (offsets?.Ax || 0);
+  let Ay = rawData.Ay - (offsets?.Ay || 0);
+  let Az = rawData.Az - (offsets?.Az || 0);
+
+  let newData = { roll, pitch, yaw, Ax, Ay, Az };
+
+  // --- apply spike filter, skipping first few readings after calibration ---
+  const rpyThresh = parseFloat(rpyThresholdInput.value) || CONFIG.spikeThresholds.rpy;
+  const accThresh = parseFloat(accThresholdInput.value) || CONFIG.spikeThresholds.acc;
+  if(latestData && skipSpikeCount <= 0){
+    for(let k of ['roll','pitch','yaw'])
+      if(Math.abs(newData[k] - latestData[k]) > rpyThresh)
+        newData[k] = latestData[k];
+    for(let k of ['Ax','Ay','Az'])
+      if(Math.abs(newData[k] - latestData[k]) > accThresh)
+        newData[k] = latestData[k];
+  }
+
+  // decrement skip counter if set
+  if(skipSpikeCount > 0) skipSpikeCount--;
+
+  latestData = newData;
+
+  // --- update charts and visuals ---
+  if(sending){
+    const t = new Date().toLocaleTimeString();
+    addData(rpyChart, t, [latestData.roll, latestData.pitch, latestData.yaw]);
+    addData(accChart, t, [latestData.Ax, latestData.Ay, latestData.Az]);
+
+    xyCircle.data.datasets[0].data = [{x: latestData.Ax, y: latestData.Ay}]; xyCircle.update();
+    xzCircle.data.datasets[0].data = [{x: latestData.Ax, y: latestData.Az}]; xzCircle.update();
+    zyCircle.data.datasets[0].data = [{x: latestData.Ay, y: latestData.Az}]; zyCircle.update();
+  }
+}
 
 
- </head>
-
-
- <body>
-
-
-  <script src="https://www.puck-js.com/puck.js"></script>
-
-
-  <button onclick="Puck.write('LED1.set();\n');">LED On!</button>
-
-
-  <button onclick="Puck.write('LED1.reset();\n');">LED Off!</button>
-
-
- </body>
-
-
+function addData(chart,label,data){
+  chart.data.labels.push(label);
+  chart.data.datasets.forEach((ds,i)=>ds.data.push(data[i]));
+  if(chart.data.labels.length>CONFIG.chartWindowSize){ chart.data.labels.shift(); chart.data.datasets.forEach(ds=>ds.data.shift()); }
+  if(chart===rpyChart){ chart.options.scales.y.min=parseFloat(rpyMinInput.value); chart.options.scales.y.max=parseFloat(rpyMaxInput.value); }
+  else { chart.options.scales.y.min=parseFloat(accMinInput.value); chart.options.scales.y.max=parseFloat(accMaxInput.value); }
+  chart.update();
+}
+</script>
+</body>
 </html>
