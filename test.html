@@ -230,7 +230,6 @@ function handleData(event){
   pitch = wrapAngle(pitch);
   yaw = wrapAngle(yaw);
   
-  const newData = { roll, pitch, yaw, Ax, Ay, Az };
   let Ax = rawData.Ax - (offsets?.Ax || 0);
   let Ay = rawData.Ay - (offsets?.Ay || 0);
   let Az = rawData.Az - (offsets?.Az || 0);
