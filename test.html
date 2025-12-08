@@ -108,6 +108,13 @@ function createCircleChart(canvasId,xLabel,yLabel,color){
     options:{animation:false,responsive:false,plugins:{legend:{display:false}},scales:{x:{min:-5,max:5,title:{display:true,text:xLabel}},y:{min:-5,max:5,title:{display:true,text:yLabel}}}}
   });
 }
+
+function wrapAngle(angle) {
+  // Wrap angle to [-180, 180]
+  angle = ((angle + 180) % 360);
+  if (angle < 0) angle += 360;
+  return angle - 180;
+}
 const xyCircle = createCircleChart('xyCircle','Ax (G)','Ay (G)','blue');
 const xzCircle = createCircleChart('xzCircle','Ax (G)','Az (G)','green');
 const zyCircle = createCircleChart('zyCircle','Ay (G)','Az (G)','red');
@@ -218,6 +225,12 @@ function handleData(event){
   let roll = rawData.roll - (offsets?.roll || 0);
   let pitch = rawData.pitch - (offsets?.pitch || 0);
   let yaw = rawData.yaw - (offsets?.yaw || 0);
+  // Wrap to [-180, 180]
+  roll = wrapAngle(roll);
+  pitch = wrapAngle(pitch);
+  yaw = wrapAngle(yaw);
+  
+  const newData = { roll, pitch, yaw, Ax, Ay, Az };
   let Ax = rawData.Ax - (offsets?.Ax || 0);
   let Ay = rawData.Ay - (offsets?.Ay || 0);
   let Az = rawData.Az - (offsets?.Az || 0);
