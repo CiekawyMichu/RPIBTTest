@@ -19,6 +19,12 @@
 <button id="connectBtn">Connect to Pi</button>
 <button id="startStopBtn" disabled>Stop</button>
 
+<h2>Recording</h2>
+<button id="recordBtn" disabled>Start Recording</button>
+<select id="recordingsList" size="5" style="width: 200px;"></select>
+<button id="downloadBtn" disabled>Download Selected</button>
+
+
 <h2>Calibration & Thresholds</h2>
 <button id="calibrateBtn" disabled>Calibrate Now</button>
 <div>
@@ -272,6 +278,62 @@ function addData(chart,label,data){
   if(chart===rpyChart){ chart.options.scales.y.min=parseFloat(rpyMinInput.value); chart.options.scales.y.max=parseFloat(rpyMaxInput.value); }
   else { chart.options.scales.y.min=parseFloat(accMinInput.value); chart.options.scales.y.max=parseFloat(accMaxInput.value); }
   chart.update();
+
+  const recordBtn = document.getElementById('recordBtn');
+const recordingsList = document.getElementById('recordingsList');
+const downloadBtn = document.getElementById('downloadBtn');
+
+let recording = false;
+
+// --- Send BLE command to Pi ---
+function sendBLECommand(cmd){
+  if(!txChar) return;
+  const encoder = new TextEncoder();
+  txChar.writeValue(encoder.encode(cmd));
+}
+
+// --- Record button ---
+recordBtn.addEventListener('click', ()=>{
+  if(!recording){
+    sendBLECommand('START_RECORD');
+    recording = true;
+    recordBtn.textContent = 'Stop Recording';
+    status.textContent = 'Recording started';
+  } else {
+    sendBLECommand('STOP_RECORD');
+    recording = false;
+    recordBtn.textContent = 'Start Recording';
+    status.textContent = 'Recording stopped';
+    requestRecordingsList();
+  }
+});
+
+// --- Request recordings list from Pi ---
+function requestRecordingsList(){
+  sendBLECommand('LIST_RECORDINGS');
+}
+
+// --- Populate recordings dropdown ---
+function updateRecordingsList(files){
+  recordingsList.innerHTML = '';
+  files.forEach(f=>{
+    const opt = document.createElement('option');
+    opt.value = f;
+    opt.textContent = f;
+    recordingsList.appendChild(opt);
+  });
+  downloadBtn.disabled = files.length === 0;
+}
+
+// --- Download selected recording ---
+downloadBtn.addEventListener('click', async ()=>{
+  const selected = recordingsList.value;
+  if(!selected) return;
+  status.textContent = 'Downloading ' + selected + '...';
+  sendBLECommand('GET_RECORDING:' + selected);
+  // Pi should send file in chunks; you can handle this in characteristicvaluechanged
+});
+
 }
 </script>
 </body>
