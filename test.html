@@ -45,7 +45,7 @@
 
 <h2>Roll, Pitch, Yaw</h2>
 <canvas id="rpyChart"></canvas>
-
+  
 <h2>Linear Acceleration</h2>
 <canvas id="accChart"></canvas>
 
@@ -162,8 +162,11 @@ connectBtn.addEventListener('click', async () => {
     await txChar.startNotifications();
     txChar.addEventListener('characteristicvaluechanged', handleData);
     status.textContent = "Connected! Receiving data...";
-    calibrateBtn.disabled = false;
-    startStopBtn.disabled = false;
+  calibrateBtn.disabled = false;
+  startStopBtn.disabled = false;
+  recordBtn.disabled = false;  // <-- enable Record button
+  downloadBtn.disabled = true; // initially nothing to download
+
   } catch(err){ console.error(err); status.textContent = "Failed to connect"; }
 });
 
