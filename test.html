@@ -225,10 +225,10 @@ function handleData(event){
   };
 
   // --- auto calibrate if first reading ---
-  if(offsets === null && CONFIG.autoCalibrateOnFirstData){
+  /*if(offsets === null && CONFIG.autoCalibrateOnFirstData){
     offsets = {...rawData};
     status.textContent = "Initial Calibration Complete";
-  }
+  }*/
 
   // Wrap angles first
 let roll = wrapAngle(rawData.roll - (offsets?.roll || 0));
