@@ -52,6 +52,35 @@
 <h2>Steering Wheel</h2>
 <canvas id="steerWheel" width="300" height="300" style="border:1px solid #000;"></canvas>
 <div id="steerAngle">Steering: 0°</div>
+
+<div id="steerControls" style="max-width: 340px; margin-top: 10px;">
+  <div style="margin: 6px 0;">
+    <label>Skalowanie (° kierownicy na 1° roll): <span id="steerMultVal">4.0</span></label><br/>
+    <input id="steerMult" type="range" min="0.5" max="20" step="0.1" value="4.0" style="width: 320px;">
+  </div>
+
+  <div style="margin: 6px 0;">
+    <label>Limit obrotu (°): <span id="steerMaxVal">540</span></label><br/>
+    <input id="steerMax" type="range" min="90" max="1080" step="10" value="540" style="width: 320px;">
+  </div>
+
+  <div style="margin: 6px 0;">
+    <label>Wygładzenie: <span id="steerSmoothVal">0.20</span></label><br/>
+    <input id="steerSmooth" type="range" min="0.01" max="1.0" step="0.01" value="0.20" style="width: 320px;">
+  </div>
+
+  <div style="margin-top: 8px;">
+    <button id="steerZeroBtn">Wyzeruj kierownicę</button>
+    <label style="margin-left: 12px; user-select: none;">
+      <input id="steerInvert" type="checkbox"> Odwróć kierunek
+    </label>
+  </div>
+
+  <div style="font-size: 12px; opacity: 0.75; margin-top: 6px;">
+    Tip: jeśli czujnik jest na obręczy i roll ≈ kąt skrętu, zacznij od skalowania ~1.0.
+  </div>
+</div>
+
 <div style="font-size: 12px; opacity: 0.75;">(mapped from Roll; adjust mapping in JS if you want yaw-based steering)</div>
 
 
@@ -137,8 +166,64 @@ const steerCtx = steerCanvas.getContext('2d');
 const steerAngleEl = document.getElementById('steerAngle');
 
 // Map sensor roll (deg) -> steering wheel rotation (deg)
-const STEER_MULT = 10;     // 1° roll = 10° wheel rotation (tweak to taste)
-const STEER_MAX  = 540;    // clamp wheel rotation
+// Dynamic controls (slider + zero + invert + smoothing)
+const steerMultInput = document.getElementById('steerMult');
+const steerMaxInput = document.getElementById('steerMax');
+const steerSmoothInput = document.getElementById('steerSmooth');
+const steerMultVal = document.getElementById('steerMultVal');
+const steerMaxVal = document.getElementById('steerMaxVal');
+const steerSmoothVal = document.getElementById('steerSmoothVal');
+const steerZeroBtn = document.getElementById('steerZeroBtn');
+const steerInvertChk = document.getElementById('steerInvert');
+
+let steerMult = parseFloat(steerMultInput?.value ?? '4.0');
+let steerMax  = parseFloat(steerMaxInput?.value  ?? '540');
+let steerSmooth = parseFloat(steerSmoothInput?.value ?? '0.20'); // 0..1, higher = less smoothing
+let steerZero = 0;             // roll offset when "straight"
+let steerInvert = false;       // flip direction
+let steerDisplayed = 0;        // smoothed steering angle (deg)
+const STEER_DEADZONE_DEG = 0.5;
+
+function bindSteerControls(){
+  if(!steerMultInput) return;
+
+  const refreshLabels = () => {
+    steerMultVal.textContent = steerMult.toFixed(1);
+    steerMaxVal.textContent = Math.round(steerMax).toString();
+    steerSmoothVal.textContent = steerSmooth.toFixed(2);
+  };
+
+  steerMultInput.addEventListener('input', () => {
+    steerMult = parseFloat(steerMultInput.value);
+    refreshLabels();
+  });
+
+  steerMaxInput.addEventListener('input', () => {
+    steerMax = parseFloat(steerMaxInput.value);
+    refreshLabels();
+  });
+
+  steerSmoothInput.addEventListener('input', () => {
+    steerSmooth = parseFloat(steerSmoothInput.value);
+    refreshLabels();
+  });
+
+  steerInvertChk.addEventListener('change', () => {
+    steerInvert = !!steerInvertChk.checked;
+  });
+
+  steerZeroBtn.addEventListener('click', () => {
+    if(latestData && typeof latestData.roll === 'number'){
+      steerZero = latestData.roll;
+      steerDisplayed = 0; // snap to zero after recalibration
+      drawSteeringWheel(0);
+      steerAngleEl.textContent = `Steering: 0°`;
+    }
+  });
+
+  refreshLabels();
+}
+bindSteerControls();
 
 function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
 
@@ -209,10 +294,18 @@ function animateRPY(){
     cube.rotation.x = pitchRad;
     cube.rotation.y = yawRad;
     cube.rotation.z = rollRad;
-    const steerDeg = clamp(latestData.roll * STEER_MULT, -STEER_MAX, STEER_MAX);
-    drawSteeringWheel(steerDeg);
-    steerAngleEl.textContent = `Steering: ${steerDeg.toFixed(0)}°`;
-  }
+    // Steering mapped from roll with scaling + zero + invert + deadzone + smoothing
+    let rollForSteer = (latestData.roll - steerZero);
+    if(steerInvert) rollForSteer = -rollForSteer;
+
+    let steerTarget = clamp(rollForSteer * steerMult, -steerMax, steerMax);
+    if(Math.abs(steerTarget) < STEER_DEADZONE_DEG) steerTarget = 0;
+
+    // 1st order smoothing (displayed angle follows target)
+    steerDisplayed = steerDisplayed + steerSmooth * (steerTarget - steerDisplayed);
+
+    drawSteeringWheel(steerDisplayed);
+    steerAngleEl.textContent = `Steering: ${steerDisplayed.toFixed(0)}°`;}
   renderer.render(scene,camera);
 }
 animateRPY();
