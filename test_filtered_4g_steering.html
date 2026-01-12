@@ -76,6 +76,16 @@
     </label>
   </div>
 
+
+  <div style="margin: 6px 0;">
+    <label>Średnica kierownicy (mm): <span id="steerDiaVal">350</span></label><br/>
+    <input id="steerDia" type="range" min="240" max="450" step="5" value="350" style="width: 320px;">
+  </div>
+
+  <div id="steerRimTravel" style="font-size: 13px; margin-top: 4px; opacity: 0.85;">
+    Ruch na obręczy: 0.0 cm
+  </div>
+
   <div style="font-size: 12px; opacity: 0.75; margin-top: 6px;">
     Tip: jeśli czujnik jest na obręczy i roll ≈ kąt skrętu, zacznij od skalowania ~1.0.
   </div>
@@ -170,15 +180,19 @@ const steerAngleEl = document.getElementById('steerAngle');
 const steerMultInput = document.getElementById('steerMult');
 const steerMaxInput = document.getElementById('steerMax');
 const steerSmoothInput = document.getElementById('steerSmooth');
+const steerDiaInput = document.getElementById('steerDia');
 const steerMultVal = document.getElementById('steerMultVal');
 const steerMaxVal = document.getElementById('steerMaxVal');
 const steerSmoothVal = document.getElementById('steerSmoothVal');
+const steerDiaVal = document.getElementById('steerDiaVal');
+const steerRimTravelEl = document.getElementById('steerRimTravel');
 const steerZeroBtn = document.getElementById('steerZeroBtn');
 const steerInvertChk = document.getElementById('steerInvert');
 
 let steerMult = parseFloat(steerMultInput?.value ?? '4.0');
 let steerMax  = parseFloat(steerMaxInput?.value  ?? '540');
 let steerSmooth = parseFloat(steerSmoothInput?.value ?? '0.20'); // 0..1, higher = less smoothing
+let steerDia = parseFloat(steerDiaInput?.value ?? '350'); // steering wheel diameter in mm
 let steerZero = 0;             // roll offset when "straight"
 let steerInvert = false;       // flip direction
 let steerDisplayed = 0;        // smoothed steering angle (deg)
@@ -191,6 +205,7 @@ function bindSteerControls(){
     steerMultVal.textContent = steerMult.toFixed(1);
     steerMaxVal.textContent = Math.round(steerMax).toString();
     steerSmoothVal.textContent = steerSmooth.toFixed(2);
+    if(steerDiaVal) steerDiaVal.textContent = Math.round(steerDia).toString();
   };
 
   steerMultInput.addEventListener('input', () => {
@@ -207,6 +222,13 @@ function bindSteerControls(){
     steerSmooth = parseFloat(steerSmoothInput.value);
     refreshLabels();
   });
+
+  if(steerDiaInput){
+    steerDiaInput.addEventListener('input', () => {
+      steerDia = parseFloat(steerDiaInput.value);
+      refreshLabels();
+    });
+  }
 
   steerInvertChk.addEventListener('change', () => {
     steerInvert = !!steerInvertChk.checked;
@@ -305,7 +327,13 @@ function animateRPY(){
     steerDisplayed = steerDisplayed + steerSmooth * (steerTarget - steerDisplayed);
 
     drawSteeringWheel(steerDisplayed);
-    steerAngleEl.textContent = `Steering: ${steerDisplayed.toFixed(0)}°`;}
+    steerAngleEl.textContent = `Steering: ${steerDisplayed.toFixed(0)}°`;
+    // Rim travel (arc length) based on chosen steering wheel diameter
+    if(steerRimTravelEl){
+      const diaCm = steerDia / 10.0; // mm -> cm
+      const travelCm = (Math.PI * diaCm) * (steerDisplayed / 360.0);
+      steerRimTravelEl.textContent = `Ruch na obręczy: ${travelCm.toFixed(1)} cm`;
+    }}
   renderer.render(scene,camera);
 }
 animateRPY();
