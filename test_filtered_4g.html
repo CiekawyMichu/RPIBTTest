@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>MPU6050 Full Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+  body { font-family: sans-serif; padding: 20px; }
+  canvas { max-width: 400px; margin: 10px; }
+  button, input, select { margin: 5px; padding: 5px; }
+  label { margin-right: 10px; display:inline-block; }
+  .circle-container { display:flex; flex-direction:column; align-items:center; }
+  .circle-item { margin:10px; }
+  h2 { margin-top: 30px; border-bottom: 2px solid #ccc; }
+</style>
+</head>
+<body>
+
+<h1>MPU6050 Dashboard</h1>
+<div id="status" style="font-weight:bold; color:blue;">Not connected</div>
+<button id="connectBtn">Connect to Pi</button>
+<button id="startStopBtn" disabled>Pause Charts</button>
+
+<h2>Recording</h2>
+<button id="recordBtn" disabled>Start Recording</button>
+<select id="recordingsList" style="width: 250px;"></select>
+<button id="refreshListBtn" disabled>Refresh List</button>
+<button id="downloadBtn" disabled>Download Selected (Log Only)</button>
+
+<h2>Calibration & Thresholds</h2>
+<button id="calibrateBtn" disabled>Calibrate Now</button>
+<div>
+  <label>Poll rate (Hz): <input type="number" id="pollRateHzInput" value="30"></label>
+</div>
+
+<h2>Roll, Pitch, Yaw</h2>
+<canvas id="rpyChart"></canvas>
+  
+<h2>Linear Acceleration (gravity removed)</h2>
+<canvas id="accChart"></canvas>
+
+<h2>Linear Acceleration Circles (g)</h2>
+<div class="circle-container">
+  <div class="circle-item"><canvas id="xyCircle" width="300" height="300"></canvas></div>
+  <div class="circle-item"><canvas id="xzCircle" width="300" height="300"></canvas></div>
+  <div class="circle-item"><canvas id="zyCircle" width="300" height="300"></canvas></div>
+</div>
+
+<h2>RPY Visualization</h2>
+<canvas id="rpyViz" width="400" height="400" style="border:1px solid #000;"></canvas>
+
+<script type="module">
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.162.0/build/three.module.js';
+
+// ===== CONFIG =====
+const CONFIG = {
+  spikeThresholds: { rpy: 80, acc: 5 },
+  yAxisLimits: { rpy: {min:-180,max:180}, acc: {min:-4,max:4} },
+  chartWindowSize: 50,
+  pollRateHz: 30
+};
+
+// ===== DOM Elements =====
+const status = document.getElementById('status');
+const connectBtn = document.getElementById('connectBtn');
+const startStopBtn = document.getElementById('startStopBtn');
+const recordBtn = document.getElementById('recordBtn');
+const recordingsList = document.getElementById('recordingsList');
+const refreshListBtn = document.getElementById('refreshListBtn');
+const downloadBtn = document.getElementById('downloadBtn');
+const calibrateBtn = document.getElementById('calibrateBtn');
+const pollRateHzInput = document.getElementById('pollRateHzInput');
+
+let device, server, service, txChar;
+let rawData = null;      
+let latestData = null;   
+let offsets = null;      
+let skipSpikeCount = 0;  
+let chartsActive = true;
+let isRecording = false;
+
+// ===== Charts =====
+const rpyData = {labels: [], datasets:[
+  {label:'Roll', borderColor:'red', data:[]},
+  {label:'Pitch', borderColor:'green', data:[]},
+  {label:'Yaw', borderColor:'blue', data:[]}
+]};
+const accData = {labels: [], datasets:[
+  {label:'Ax', borderColor:'red', data:[]},
+  {label:'Ay', borderColor:'green', data:[]},
+  {label:'Az', borderColor:'blue', data:[]}
+]};
+
+const rpyChart = new Chart(document.getElementById('rpyChart'), {type:'line', data:rpyData, options:{animation:false,responsive:true,scales:{x:{title:{display:true,text:'Time'}},y:{min:-180,max:180,title:{display:true,text:'Degrees'}}}}});
+const accChart = new Chart(document.getElementById('accChart'), {type:'line', data:accData, options:{animation:false,responsive:true,scales:{x:{title:{display:true,text:'Time'}},y:{min:-4,max:4,title:{display:true,text:'G'}}}}});
+
+// ===== Scatter Circles =====
+function createCircleChart(canvasId,xLabel,yLabel,color){
+  return new Chart(document.getElementById(canvasId),{
+    type:'scatter',
+    data:{datasets:[{label:'',data:[{x:0,y:0}],borderColor:color,backgroundColor:color}]},
+    options:{animation:false,responsive:false,plugins:{legend:{display:false}},scales:{x:{min:-4,max:4,title:{display:true,text:xLabel}},y:{min:-4,max:4,title:{display:true,text:yLabel}}}}
+  });
+}
+
+function wrapAngle(angle) {
+  angle = ((angle + 180) % 360);
+  if (angle < 0) angle += 360;
+  return angle - 180;
+}
+const xyCircle = createCircleChart('xyCircle','Ax (G)','Ay (G)','blue');
+const xzCircle = createCircleChart('xzCircle','Ax (G)','Az (G)','green');
+const zyCircle = createCircleChart('zyCircle','Ay (G)','Az (G)','red');
+
+// ===== 3D RPY Visualization =====
+const vizCanvas = document.getElementById('rpyViz');
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(75,1,0.1,1000);
+const renderer = new THREE.WebGLRenderer({canvas:vizCanvas});
+renderer.setSize(400,400);
+
+const geometry = new THREE.BoxGeometry(1,0.5,0.2);
+const material = new THREE.MeshNormalMaterial();
+const cube = new THREE.Mesh(geometry,material);
+scene.add(cube);
+camera.position.z = 3;
+
+function animateRPY(){
+  requestAnimationFrame(animateRPY);
+  if(latestData){
+    const rollRad = latestData.roll * Math.PI/180;
+    const pitchRad = latestData.pitch * Math.PI/180;
+    const yawRad = latestData.yaw * Math.PI/180;
+    cube.rotation.x = pitchRad;
+    cube.rotation.y = yawRad;
+    cube.rotation.z = rollRad;
+  }
+  renderer.render(scene,camera);
+}
+animateRPY();
+
+// ===== BLE Connection =====
+connectBtn.addEventListener('click', async () => {
+  try {
+    device = await navigator.bluetooth.requestDevice({filters:[{name:'PiPuck'}],optionalServices:['6e400001-b5a3-f393-e0a9-e50e24dcca9e']});
+    server = await device.gatt.connect();
+    service = await server.getPrimaryService('6e400001-b5a3-f393-e0a9-e50e24dcca9e');
+    txChar = await service.getCharacteristic('6e400003-b5a3-f393-e0a9-e50e24dcca9e');
+    await txChar.startNotifications();
+    txChar.addEventListener('characteristicvaluechanged', handleData);
+    status.textContent = "Connected! Receiving data...";
+    
+    // Enable controls
+    calibrateBtn.disabled = false;
+    startStopBtn.disabled = false;
+    recordBtn.disabled = false;
+    refreshListBtn.disabled = false;
+    
+    // Request initial list
+    requestRecordingsList();
+
+  } catch(err){ console.error(err); status.textContent = "Failed to connect: " + err; }
+});
+
+function sendBLECommand(cmd){
+  if(!txChar) return;
+  const encoder = new TextEncoder();
+  txChar.writeValue(encoder.encode(cmd));
+}
+
+// ===== Control Handlers =====
+
+startStopBtn.addEventListener('click', ()=>{ 
+    chartsActive = !chartsActive; 
+    startStopBtn.textContent = chartsActive ? "Pause Charts" : "Resume Charts"; 
+});
+
+pollRateHzInput.addEventListener('change', ()=>{ 
+    CONFIG.pollRateHz = parseFloat(pollRateHzInput.value)||CONFIG.pollRateHz; 
+});
+
+calibrateBtn.addEventListener('click', ()=>{
+  if(!rawData) return;
+  offsets = {...rawData};  
+  skipSpikeCount = 5;      
+  latestData = null;       
+  status.textContent = "Calibrated. Offsets applied.";
+});
+
+// ===== Recording Handlers (MOVED OUTSIDE LOOP) =====
+
+recordBtn.addEventListener('click', () => {
+    if(!isRecording){
+        sendBLECommand('START_RECORD');
+        isRecording = true;
+        recordBtn.textContent = 'Stop Recording';
+        status.textContent = 'Recording started...';
+        recordBtn.style.backgroundColor = "#ffdddd";
+    } else {
+        sendBLECommand('STOP_RECORD');
+        isRecording = false;
+        recordBtn.textContent = 'Start Recording';
+        recordBtn.style.backgroundColor = "";
+        status.textContent = 'Recording stopped. Saving...';
+        
+        // Wait 1s for file save, then update list
+        setTimeout(requestRecordingsList, 1000);
+    }
+});
+
+refreshListBtn.addEventListener('click', requestRecordingsList);
+
+function requestRecordingsList(){
+  sendBLECommand('LIST_RECORDINGS');
+}
+
+function updateRecordingsList(files){
+  recordingsList.innerHTML = '';
+  files.forEach(f=>{
+    if(f.trim() === "") return;
+    const opt = document.createElement('option');
+    opt.value = f;
+    opt.textContent = f;
+    recordingsList.appendChild(opt);
+  });
+  downloadBtn.disabled = files.length === 0;
+  if(files.length > 0) status.textContent = "File list updated.";
+}
+
+downloadBtn.addEventListener('click', () => {
+    // Currently purely logs to console as Python side needs file transfer logic
+    console.log("Requesting download for: " + recordingsList.value);
+    status.textContent = "Download logic not yet implemented on Pi.";
+});
+
+// ===== Data Handling =====
+let lastUpdate = 0;
+
+function handleData(event){
+  const now = performance.now();
+  if(now - lastUpdate < 1000 / CONFIG.pollRateHz) return;
+  lastUpdate = now;
+
+  const rawString = new TextDecoder().decode(event.target.value);
+
+  // --- 1. Check for File List ---
+  if (rawString.startsWith("LIST:")) {
+      const listData = rawString.replace("LIST:", "");
+      const files = listData.split(",");
+      updateRecordingsList(files);
+      return; // Stop processing
+  }
+
+  // --- 2. Check for Sensor Data ---
+  const match = rawString.match(/RPY:\s*([\d\-.]+),([\d\-.]+),([\d\-.]+)\s*\|\s*Acc:\s*([\d\-.]+),([\d\-.]+),([\d\-.]+),?/);
+  if(!match) return;
+
+  rawData = {
+    roll: parseFloat(match[1]),
+    pitch: parseFloat(match[2]),
+    yaw: parseFloat(match[3]),
+    Ax: parseFloat(match[4]),
+    Ay: parseFloat(match[5]),
+    Az: parseFloat(match[6])
+  };
+
+  let roll = wrapAngle(rawData.roll - (offsets?.roll || 0));
+  let pitch = wrapAngle(rawData.pitch - (offsets?.pitch || 0));
+  let yaw = wrapAngle(rawData.yaw - (offsets?.yaw || 0));
+  let Ax = rawData.Ax - (offsets?.Ax || 0);
+  let Ay = rawData.Ay - (offsets?.Ay || 0);
+  let Az = rawData.Az - (offsets?.Az || 0);
+
+  let newData = { roll, pitch, yaw, Ax, Ay, Az };
+
+  // Spike filter
+  if (latestData && skipSpikeCount <= 0) {
+    const rpyThresh = CONFIG.spikeThresholds.rpy;
+    const accThresh = CONFIG.spikeThresholds.acc;
+
+    for (let k of ['roll','pitch','yaw']) {
+        const diff = wrapAngle(newData[k] - latestData[k]);
+        if (Math.abs(diff) > rpyThresh) newData[k] = latestData[k];
+    }
+    for (let k of ['Ax','Ay','Az']) {
+        if (Math.abs(newData[k] - latestData[k]) > accThresh) newData[k] = latestData[k];
+    }
+  }
+
+  if (skipSpikeCount > 0) skipSpikeCount--;
+  latestData = newData;
+
+  // Update Charts
+  if(chartsActive){
+    const t = new Date().toLocaleTimeString();
+    addData(rpyChart, t, [latestData.roll, latestData.pitch, latestData.yaw]);
+    addData(accChart, t, [latestData.Ax, latestData.Ay, latestData.Az]);
+    
+    xyCircle.data.datasets[0].data = [{x: latestData.Ax, y: latestData.Ay}]; xyCircle.update();
+    xzCircle.data.datasets[0].data = [{x: latestData.Ax, y: latestData.Az}]; xzCircle.update();
+    zyCircle.data.datasets[0].data = [{x: latestData.Ay, y: latestData.Az}]; zyCircle.update();
+  }
+}
+
+function addData(chart,label,data){
+  chart.data.labels.push(label);
+  chart.data.datasets.forEach((ds,i)=>ds.data.push(data[i]));
+  
+  if(chart.data.labels.length > CONFIG.chartWindowSize){ 
+      chart.data.labels.shift(); 
+      chart.data.datasets.forEach(ds=>ds.data.shift()); 
+  }
+  chart.update();
+}
+</script>
+</body>
+</html>
