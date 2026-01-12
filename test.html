@@ -5,40 +5,30 @@
 <title>MPU6050 Full Dashboard</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
+  body { font-family: sans-serif; padding: 20px; }
   canvas { max-width: 400px; margin: 10px; }
-  button, input { margin: 5px; }
-  label { margin-right: 10px; }
+  button, input, select { margin: 5px; padding: 5px; }
+  label { margin-right: 10px; display:inline-block; }
   .circle-container { display:flex; flex-direction:column; align-items:center; }
   .circle-item { margin:10px; }
+  h2 { margin-top: 30px; border-bottom: 2px solid #ccc; }
 </style>
 </head>
 <body>
 
 <h1>MPU6050 Dashboard</h1>
-<div id="status">Not connected</div>
+<div id="status" style="font-weight:bold; color:blue;">Not connected</div>
 <button id="connectBtn">Connect to Pi</button>
-<button id="startStopBtn" disabled>Stop</button>
+<button id="startStopBtn" disabled>Pause Charts</button>
 
 <h2>Recording</h2>
 <button id="recordBtn" disabled>Start Recording</button>
-<select id="recordingsList" size="5" style="width: 200px;"></select>
-<button id="downloadBtn" disabled>Download Selected</button>
-
+<select id="recordingsList" style="width: 250px;"></select>
+<button id="refreshListBtn" disabled>Refresh List</button>
+<button id="downloadBtn" disabled>Download Selected (Log Only)</button>
 
 <h2>Calibration & Thresholds</h2>
 <button id="calibrateBtn" disabled>Calibrate Now</button>
-<div>
-  <label>RPY Spike Threshold (deg): <input type="number" id="rpyThresholdInput" value="80"></label>
-  <label>Acc Spike Threshold (G): <input type="number" id="accThresholdInput" value="5"></label>
-</div>
-<div>
-  <label>RPY Y-axis Min: <input type="number" id="rpyMinInput" value="-180"></label>
-  <label>RPY Y-axis Max: <input type="number" id="rpyMaxInput" value="180"></label>
-</div>
-<div>
-  <label>Acc Y-axis Min: <input type="number" id="accMinInput" value="-5"></label>
-  <label>Acc Y-axis Max: <input type="number" id="accMaxInput" value="5"></label>
-</div>
 <div>
   <label>Poll rate (Hz): <input type="number" id="pollRateHzInput" value="30"></label>
 </div>
@@ -67,7 +57,6 @@ const CONFIG = {
   spikeThresholds: { rpy: 80, acc: 5 },
   yAxisLimits: { rpy: {min:-180,max:180}, acc: {min:-5,max:5} },
   chartWindowSize: 50,
-  autoCalibrateOnFirstData: true,
   pollRateHz: 30
 };
 
@@ -75,21 +64,20 @@ const CONFIG = {
 const status = document.getElementById('status');
 const connectBtn = document.getElementById('connectBtn');
 const startStopBtn = document.getElementById('startStopBtn');
+const recordBtn = document.getElementById('recordBtn');
+const recordingsList = document.getElementById('recordingsList');
+const refreshListBtn = document.getElementById('refreshListBtn');
+const downloadBtn = document.getElementById('downloadBtn');
 const calibrateBtn = document.getElementById('calibrateBtn');
-const rpyThresholdInput = document.getElementById('rpyThresholdInput');
-const accThresholdInput = document.getElementById('accThresholdInput');
-const rpyMinInput = document.getElementById('rpyMinInput');
-const rpyMaxInput = document.getElementById('rpyMaxInput');
-const accMinInput = document.getElementById('accMinInput');
-const accMaxInput = document.getElementById('accMaxInput');
 const pollRateHzInput = document.getElementById('pollRateHzInput');
 
 let device, server, service, txChar;
-let rawData = null;      // latest raw sensor readings
-let latestData = null;   // offset-adjusted data
-let offsets = null;      // calibration offsets
-let skipSpikeCount = 0;  // number of readings to skip spike filter after calibration
-let sending = true;
+let rawData = null;      
+let latestData = null;   
+let offsets = null;      
+let skipSpikeCount = 0;  
+let chartsActive = true;
+let isRecording = false;
 
 // ===== Charts =====
 const rpyData = {labels: [], datasets:[
@@ -103,8 +91,8 @@ const accData = {labels: [], datasets:[
   {label:'Az', borderColor:'blue', data:[]}
 ]};
 
-const rpyChart = new Chart(document.getElementById('rpyChart'), {type:'line', data:rpyData, options:{animation:false,responsive:true,scales:{x:{title:{display:true,text:'Time'}},y:{min:CONFIG.yAxisLimits.rpy.min,max:CONFIG.yAxisLimits.rpy.max,title:{display:true,text:'Degrees'}}}}});
-const accChart = new Chart(document.getElementById('accChart'), {type:'line', data:accData, options:{animation:false,responsive:true,scales:{x:{title:{display:true,text:'Time'}},y:{min:CONFIG.yAxisLimits.acc.min,max:CONFIG.yAxisLimits.acc.max,title:{display:true,text:'G'}}}}});
+const rpyChart = new Chart(document.getElementById('rpyChart'), {type:'line', data:rpyData, options:{animation:false,responsive:true,scales:{x:{title:{display:true,text:'Time'}},y:{min:-180,max:180,title:{display:true,text:'Degrees'}}}}});
+const accChart = new Chart(document.getElementById('accChart'), {type:'line', data:accData, options:{animation:false,responsive:true,scales:{x:{title:{display:true,text:'Time'}},y:{min:-5,max:5,title:{display:true,text:'G'}}}}});
 
 // ===== Scatter Circles =====
 function createCircleChart(canvasId,xLabel,yLabel,color){
@@ -116,7 +104,6 @@ function createCircleChart(canvasId,xLabel,yLabel,color){
 }
 
 function wrapAngle(angle) {
-  // Wrap angle to [-180, 180]
   angle = ((angle + 180) % 360);
   if (angle < 0) angle += 360;
   return angle - 180;
@@ -152,7 +139,7 @@ function animateRPY(){
 }
 animateRPY();
 
-// ===== Button Handlers =====
+// ===== BLE Connection =====
 connectBtn.addEventListener('click', async () => {
   try {
     device = await navigator.bluetooth.requestDevice({filters:[{name:'PiPuck'}],optionalServices:['6e400001-b5a3-f393-e0a9-e50e24dcca9e']});
@@ -162,59 +149,112 @@ connectBtn.addEventListener('click', async () => {
     await txChar.startNotifications();
     txChar.addEventListener('characteristicvaluechanged', handleData);
     status.textContent = "Connected! Receiving data...";
-  calibrateBtn.disabled = false;
-  startStopBtn.disabled = false;
-  recordBtn.disabled = false;  // <-- enable Record button
-  downloadBtn.disabled = true; // initially nothing to download
+    
+    // Enable controls
+    calibrateBtn.disabled = false;
+    startStopBtn.disabled = false;
+    recordBtn.disabled = false;
+    refreshListBtn.disabled = false;
+    
+    // Request initial list
+    requestRecordingsList();
 
-  } catch(err){ console.error(err); status.textContent = "Failed to connect"; }
+  } catch(err){ console.error(err); status.textContent = "Failed to connect: " + err; }
 });
 
-startStopBtn.addEventListener('click', ()=>{ sending=!sending; startStopBtn.textContent=sending?"Stop":"Start"; });
-pollRateHzInput.addEventListener('change', ()=>{ CONFIG.pollRateHz = parseFloat(pollRateHzInput.value)||CONFIG.pollRateHz; });
+function sendBLECommand(cmd){
+  if(!txChar) return;
+  const encoder = new TextEncoder();
+  txChar.writeValue(encoder.encode(cmd));
+}
+
+// ===== Control Handlers =====
+
+startStopBtn.addEventListener('click', ()=>{ 
+    chartsActive = !chartsActive; 
+    startStopBtn.textContent = chartsActive ? "Pause Charts" : "Resume Charts"; 
+});
+
+pollRateHzInput.addEventListener('change', ()=>{ 
+    CONFIG.pollRateHz = parseFloat(pollRateHzInput.value)||CONFIG.pollRateHz; 
+});
 
 calibrateBtn.addEventListener('click', ()=>{
   if(!rawData) return;
-
-  offsets = {...rawData};  // use raw sensor readings
-  skipSpikeCount = 3;      // skip spike filter for next 3 readings to avoid jumps
-  latestData = null;       // reset latestData
-  status.textContent = "Manual Calibration: New Zero Set";
-
-  // reset charts
-  rpyChart.data.labels = [];
-  rpyChart.data.datasets.forEach(ds => ds.data = []);
-  accChart.data.labels = [];
-  accChart.data.datasets.forEach(ds => ds.data = []);
-  rpyChart.update();
-  accChart.update();
-
-  // reset scatter circles
-  xyCircle.data.datasets[0].data = [{x:0, y:0}];
-  xzCircle.data.datasets[0].data = [{x:0, y:0}];
-  zyCircle.data.datasets[0].data = [{x:0, y:0}];
-  xyCircle.update(); xzCircle.update(); zyCircle.update();
-
-  // reset 3D cube
-  cube.rotation.x = 0;
-  cube.rotation.y = 0;
-  cube.rotation.z = 0;
+  offsets = {...rawData};  
+  skipSpikeCount = 5;      
+  latestData = null;       
+  status.textContent = "Calibrated. Offsets applied.";
 });
 
+// ===== Recording Handlers (MOVED OUTSIDE LOOP) =====
 
+recordBtn.addEventListener('click', () => {
+    if(!isRecording){
+        sendBLECommand('START_RECORD');
+        isRecording = true;
+        recordBtn.textContent = 'Stop Recording';
+        status.textContent = 'Recording started...';
+        recordBtn.style.backgroundColor = "#ffdddd";
+    } else {
+        sendBLECommand('STOP_RECORD');
+        isRecording = false;
+        recordBtn.textContent = 'Start Recording';
+        recordBtn.style.backgroundColor = "";
+        status.textContent = 'Recording stopped. Saving...';
+        
+        // Wait 1s for file save, then update list
+        setTimeout(requestRecordingsList, 1000);
+    }
+});
+
+refreshListBtn.addEventListener('click', requestRecordingsList);
+
+function requestRecordingsList(){
+  sendBLECommand('LIST_RECORDINGS');
+}
+
+function updateRecordingsList(files){
+  recordingsList.innerHTML = '';
+  files.forEach(f=>{
+    if(f.trim() === "") return;
+    const opt = document.createElement('option');
+    opt.value = f;
+    opt.textContent = f;
+    recordingsList.appendChild(opt);
+  });
+  downloadBtn.disabled = files.length === 0;
+  if(files.length > 0) status.textContent = "File list updated.";
+}
+
+downloadBtn.addEventListener('click', () => {
+    // Currently purely logs to console as Python side needs file transfer logic
+    console.log("Requesting download for: " + recordingsList.value);
+    status.textContent = "Download logic not yet implemented on Pi.";
+});
 
 // ===== Data Handling =====
-let lastUpdate=0;
+let lastUpdate = 0;
+
 function handleData(event){
   const now = performance.now();
   if(now - lastUpdate < 1000 / CONFIG.pollRateHz) return;
   lastUpdate = now;
 
-  const raw = new TextDecoder().decode(event.target.value);
-  const match = raw.match(/RPY:\s*([\d\-.]+),([\d\-.]+),([\d\-.]+)\s*\|\s*Acc:\s*([\d\-.]+),([\d\-.]+),([\d\-.]+),?/);
+  const rawString = new TextDecoder().decode(event.target.value);
+
+  // --- 1. Check for File List ---
+  if (rawString.startsWith("LIST:")) {
+      const listData = rawString.replace("LIST:", "");
+      const files = listData.split(",");
+      updateRecordingsList(files);
+      return; // Stop processing
+  }
+
+  // --- 2. Check for Sensor Data ---
+  const match = rawString.match(/RPY:\s*([\d\-.]+),([\d\-.]+),([\d\-.]+)\s*\|\s*Acc:\s*([\d\-.]+),([\d\-.]+),([\d\-.]+),?/);
   if(!match) return;
 
-  // --- parse raw sensor data ---
   rawData = {
     roll: parseFloat(match[1]),
     pitch: parseFloat(match[2]),
@@ -224,119 +264,53 @@ function handleData(event){
     Az: parseFloat(match[6])
   };
 
-  // --- auto calibrate if first reading ---
-  /*if(offsets === null && CONFIG.autoCalibrateOnFirstData){
-    offsets = {...rawData};
-    status.textContent = "Initial Calibration Complete";
-  }*/
+  let roll = wrapAngle(rawData.roll - (offsets?.roll || 0));
+  let pitch = wrapAngle(rawData.pitch - (offsets?.pitch || 0));
+  let yaw = wrapAngle(rawData.yaw - (offsets?.yaw || 0));
+  let Ax = rawData.Ax - (offsets?.Ax || 0);
+  let Ay = rawData.Ay - (offsets?.Ay || 0);
+  let Az = rawData.Az - (offsets?.Az || 0);
 
-  // Wrap angles first
-let roll = wrapAngle(rawData.roll - (offsets?.roll || 0));
-let pitch = wrapAngle(rawData.pitch - (offsets?.pitch || 0));
-let yaw = wrapAngle(rawData.yaw - (offsets?.yaw || 0));
+  let newData = { roll, pitch, yaw, Ax, Ay, Az };
 
-let Ax = rawData.Ax - (offsets?.Ax || 0);
-let Ay = rawData.Ay - (offsets?.Ay || 0);
-let Az = rawData.Az - (offsets?.Az || 0);
+  // Spike filter
+  if (latestData && skipSpikeCount <= 0) {
+    const rpyThresh = CONFIG.spikeThresholds.rpy;
+    const accThresh = CONFIG.spikeThresholds.acc;
 
-let newData = { roll, pitch, yaw, Ax, Ay, Az };
-
-// --- Spike checking with angle wrapping ---
-const rpyThresh = parseFloat(rpyThresholdInput.value) || CONFIG.spikeThresholds.rpy;
-const accThresh = parseFloat(accThresholdInput.value) || CONFIG.spikeThresholds.acc;
-
-if (latestData && skipSpikeCount <= 0) {
-  // Compare angles using wrapped differences
-  for (let k of ['roll','pitch','yaw']) {
-    const diff = wrapAngle(newData[k] - latestData[k]);
-    if (Math.abs(diff) > rpyThresh) newData[k] = latestData[k];
+    for (let k of ['roll','pitch','yaw']) {
+        const diff = wrapAngle(newData[k] - latestData[k]);
+        if (Math.abs(diff) > rpyThresh) newData[k] = latestData[k];
+    }
+    for (let k of ['Ax','Ay','Az']) {
+        if (Math.abs(newData[k] - latestData[k]) > accThresh) newData[k] = latestData[k];
+    }
   }
 
-  // Linear acceleration spikes as usual
-  for (let k of ['Ax','Ay','Az']) {
-    if (Math.abs(newData[k] - latestData[k]) > accThresh) newData[k] = latestData[k];
-  }
-}
+  if (skipSpikeCount > 0) skipSpikeCount--;
+  latestData = newData;
 
-if (skipSpikeCount > 0) skipSpikeCount--;
-latestData = newData;
-
-  // --- update charts and visuals ---
-  if(sending){
+  // Update Charts
+  if(chartsActive){
     const t = new Date().toLocaleTimeString();
     addData(rpyChart, t, [latestData.roll, latestData.pitch, latestData.yaw]);
     addData(accChart, t, [latestData.Ax, latestData.Ay, latestData.Az]);
-
+    
     xyCircle.data.datasets[0].data = [{x: latestData.Ax, y: latestData.Ay}]; xyCircle.update();
     xzCircle.data.datasets[0].data = [{x: latestData.Ax, y: latestData.Az}]; xzCircle.update();
     zyCircle.data.datasets[0].data = [{x: latestData.Ay, y: latestData.Az}]; zyCircle.update();
   }
 }
 
-
 function addData(chart,label,data){
   chart.data.labels.push(label);
   chart.data.datasets.forEach((ds,i)=>ds.data.push(data[i]));
-  if(chart.data.labels.length>CONFIG.chartWindowSize){ chart.data.labels.shift(); chart.data.datasets.forEach(ds=>ds.data.shift()); }
-  if(chart===rpyChart){ chart.options.scales.y.min=parseFloat(rpyMinInput.value); chart.options.scales.y.max=parseFloat(rpyMaxInput.value); }
-  else { chart.options.scales.y.min=parseFloat(accMinInput.value); chart.options.scales.y.max=parseFloat(accMaxInput.value); }
-  chart.update();
-
-  const recordBtn = document.getElementById('recordBtn');
-const recordingsList = document.getElementById('recordingsList');
-const downloadBtn = document.getElementById('downloadBtn');
-
-let recording = false;
-
-// --- Send BLE command to Pi ---
-function sendBLECommand(cmd){
-  if(!txChar) return;
-  const encoder = new TextEncoder();
-  txChar.writeValue(encoder.encode(cmd));
-}
-
-// --- Record button ---
-recordBtn.addEventListener('click', ()=>{
-  if(!recording){
-    sendBLECommand('START_RECORD');
-    recording = true;
-    recordBtn.textContent = 'Stop Recording';
-    status.textContent = 'Recording started';
-  } else {
-    sendBLECommand('STOP_RECORD');
-    recording = false;
-    recordBtn.textContent = 'Start Recording';
-    status.textContent = 'Recording stopped';
-    requestRecordingsList();
+  
+  if(chart.data.labels.length > CONFIG.chartWindowSize){ 
+      chart.data.labels.shift(); 
+      chart.data.datasets.forEach(ds=>ds.data.shift()); 
   }
-});
-
-// --- Request recordings list from Pi ---
-function requestRecordingsList(){
-  sendBLECommand('LIST_RECORDINGS');
-}
-
-// --- Populate recordings dropdown ---
-function updateRecordingsList(files){
-  recordingsList.innerHTML = '';
-  files.forEach(f=>{
-    const opt = document.createElement('option');
-    opt.value = f;
-    opt.textContent = f;
-    recordingsList.appendChild(opt);
-  });
-  downloadBtn.disabled = files.length === 0;
-}
-
-// --- Download selected recording ---
-downloadBtn.addEventListener('click', async ()=>{
-  const selected = recordingsList.value;
-  if(!selected) return;
-  status.textContent = 'Downloading ' + selected + '...';
-  sendBLECommand('GET_RECORDING:' + selected);
-  // Pi should send file in chunks; you can handle this in characteristicvaluechanged
-});
-
+  chart.update();
 }
 </script>
 </body>
